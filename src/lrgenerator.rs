@@ -1,26 +1,56 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
-const EOS_T: &str = "EOS";
+const EOS_T: &str = "$";
 const START_T: &str = "START";
 const START_NT: &str = "START";
 const EPS_T: &str = "EPS";
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Ord, PartialOrd)]
-struct Rule {
+pub struct Rule {
     head: Type,
     tokens: Vec<Type>,
     dot: usize,
 }
 
+impl std::fmt::Display for Rule {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let body = self
+            .tokens
+            .iter()
+            .enumerate()
+            .fold(String::new(), |mut acc, (i, t)| {
+                if self.dot == i {
+                    acc.push_str("•");
+                }
+                if i < self.tokens.len() {
+                    acc.push_str(&format!("{t} "));
+                } else {
+                    acc.push_str(&format!("{t}"));
+                }
+                acc
+            });
+
+        write!(f, "{} -> {}", self.head, body)
+    }
+}
+
 #[derive(Eq, Hash, PartialEq, Debug, Clone, Ord, PartialOrd)]
-enum Type {
+pub enum Type {
     Terminal(String),
     NonTerminal(String),
 }
 
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Type::Terminal(s) | Type::NonTerminal(s) => write!(f, "{s}"),
+        }
+    }
+}
+
 #[derive(Debug)]
-enum Action {
+pub enum Action {
     Shift(usize),
     Reduce(usize),
     Goto(usize),
@@ -433,7 +463,7 @@ fn follow(
     follow
 }
 
-pub fn generate_tables(file_name: &str) {
+pub fn generate_table(file_name: &str) -> (BTreeMap<(usize, Type), Action>, BTreeMap<usize, Rule>) {
     let rules = parse_config_file(file_name);
     let symbols = find_symbols(&rules);
 
@@ -443,41 +473,173 @@ pub fn generate_tables(file_name: &str) {
     let follow = follow(&first, &rules, &symbols);
 
     let reductions = rules.iter().zip(0usize..).collect::<BTreeMap<_, _>>();
-
-    for (index, sets) in sets.iter() {
-        println!("{index} -> {sets:?}\n");
-    }
-    // println!("Sets: {sets:?}");
+    let reductions_rev = rules
+        .clone()
+        .into_iter()
+        .zip(0usize..)
+        .map(|(r, i)| (i, r))
+        .collect::<BTreeMap<_, _>>();
 
     let mut table: BTreeMap<(usize, Type), Action> = BTreeMap::new();
     for ((index, symbol), next_index) in transitions.into_iter() {
-        let set = sets.get(&index).unwrap();
         if let Type::Terminal(_) = symbol {
             table.insert((index, symbol), Action::Shift(next_index));
-
-            for rule in set {
-                if after_dot(&rule) == Type::Terminal(EOS_T.to_string()) {
-                    if rule.head != Type::NonTerminal(START_NT.to_string()) {
-                        let follow_set = follow.get(&rule.head).unwrap();
-                        for f in follow_set {
-                            let reduction = reductions
-                                .get(&Rule {
-                                    head: rule.head.clone(),
-                                    tokens: rule.tokens.clone(),
-                                    dot: 0,
-                                })
-                                .unwrap();
-                            table.insert((index, f.clone()), Action::Reduce(*reduction));
-                        }
-                    } else {
-                        table.insert((index, Type::Terminal(EOS_T.to_string())), Action::Accept);
-                    }
-                }
-            }
         } else {
             table.insert((index, symbol), Action::Goto(next_index));
         }
     }
 
-    println!("{table:?}");
+    for (index, set) in sets {
+        for rule in set {
+            if after_dot(&rule) == Type::Terminal(EOS_T.to_string()) {
+                if rule.head != Type::NonTerminal(START_NT.to_string()) {
+                    let follow_set = follow.get(&rule.head).unwrap();
+                    for f in follow_set {
+                        let reduction = reductions
+                            .get(&Rule {
+                                head: rule.head.clone(),
+                                tokens: rule.tokens.clone(),
+                                dot: 0,
+                            })
+                            .unwrap();
+                        table.insert((index, f.clone()), Action::Reduce(*reduction));
+                    }
+                } else {
+                    table.insert((index, Type::Terminal(EOS_T.to_string())), Action::Accept);
+                }
+            }
+        }
+    }
+
+    (table, reductions_rev)
+}
+
+pub fn print_table(table: &BTreeMap<(usize, Type), Action>, reductions: &BTreeMap<usize, Rule>) {
+    println!("Reductions");
+    for (index, set) in reductions {
+        println!("{index}: {set}");
+    }
+
+    let states = table
+        .iter()
+        .map(|((index, _), _)| index)
+        .collect::<BTreeSet<_>>();
+
+    let min_size = states.last().unwrap().to_string().len() + 1;
+
+    let get_rule_size = |r: &Type| match r {
+        Type::Terminal(s) | Type::NonTerminal(s) => usize::max(s.len(), min_size),
+    };
+
+    let modify_sizes = |r: &Type, terminal: &mut usize, non_terminal: &mut usize| {
+        let size = get_rule_size(r);
+        match r {
+            Type::Terminal(_) => *terminal += size + 3,
+            Type::NonTerminal(_) => *non_terminal += size + 3,
+        }
+    };
+
+    let mut padding: BTreeMap<Type, usize> = BTreeMap::new();
+    let mut terminal_size: usize = 0;
+    let mut non_terminal_size: usize = 0;
+
+    for (_, rule) in reductions {
+        if rule.head != Type::NonTerminal(START_NT.to_string()) {
+            if !padding.contains_key(&rule.head) {
+                modify_sizes(&rule.head, &mut terminal_size, &mut non_terminal_size);
+            }
+
+            let size = get_rule_size(&rule.head);
+            padding.insert(rule.head.clone(), size);
+        }
+
+        for token in rule.tokens.iter() {
+            if *token == Type::NonTerminal(START_NT.to_string()) {
+                continue;
+            }
+
+            if !padding.contains_key(&token) {
+                modify_sizes(&token, &mut terminal_size, &mut non_terminal_size);
+            }
+
+            padding.insert(token.clone(), get_rule_size(&token));
+        }
+    }
+    padding.insert(
+        Type::Terminal(EOS_T.to_string()),
+        get_rule_size(&Type::Terminal(EOS_T.to_string())),
+    );
+    modify_sizes(
+        &Type::Terminal(EOS_T.to_string()),
+        &mut terminal_size,
+        &mut non_terminal_size,
+    );
+
+    println!(
+        "STATE |{:^twidth$}|{:^ntwidth$}|",
+        "Action",
+        "Goto",
+        twidth = terminal_size - 1,
+        ntwidth = non_terminal_size - 1,
+    );
+    let mut t = String::new();
+    let mut nt = String::new();
+    for (v, p) in padding.iter() {
+        match v {
+            Type::Terminal(s) => t.push_str(&format!(" {:^width$} |", s, width = p)),
+            Type::NonTerminal(s) => nt.push_str(&format!(" {:^width$} |", s, width = p)),
+        }
+    }
+    println!("      |{t}{nt}");
+
+    t = String::new();
+    nt = String::new();
+    for (v, p) in padding.iter() {
+        match v {
+            Type::Terminal(_) => t.push_str(&format!("-{:-^width$}-+", "", width = p)),
+            Type::NonTerminal(_) => nt.push_str(&format!("-{:-^width$}-+", "", width = p)),
+        }
+    }
+    println!("------+{t}{nt}");
+    for state in states {
+        t = String::new();
+        nt = String::new();
+        for (v, p) in padding.iter() {
+            match v {
+                Type::Terminal(_) => {
+                    let action = table.get(&(state.clone(), v.clone()));
+                    if let Some(a) = action {
+                        match a {
+                            Action::Shift(i) => {
+                                t.push_str(&format!(" {:>width$} |", format!("S{i}"), width = p))
+                            }
+                            Action::Reduce(i) => {
+                                t.push_str(&format!(" {:>width$} |", format!("R{i}"), width = p))
+                            }
+                            Action::Accept => {
+                                t.push_str(&format!(" {:>width$} |", "ACC", width = p))
+                            }
+                            Action::Goto(_) => t.push_str(&format!(" {:>width$} |", "", width = p)),
+                        }
+                    } else {
+                        t.push_str(&format!(" {:>width$} |", "", width = p))
+                    }
+                }
+                Type::NonTerminal(_) => {
+                    let action = table.get(&(state.clone(), v.clone()));
+                    if let Some(a) = action {
+                        match a {
+                            Action::Goto(i) => {
+                                nt.push_str(&format!(" {:>width$} |", format!("G{i}"), width = p))
+                            }
+                            _ => nt.push_str(&format!(" {:>width$} |", "", width = p)),
+                        }
+                    } else {
+                        nt.push_str(&format!(" {:>width$} |", "", width = p))
+                    }
+                }
+            }
+        }
+        println!("{:^6}|{t}{nt}", state);
+    }
 }
