@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 const EOS_T: &str = "EOS";
-const START_T: &str = "^";
+const START_T: &str = "START";
+const START_NT: &str = "START";
 const EPS_T: &str = "EPS";
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Ord, PartialOrd)]
@@ -18,7 +19,15 @@ enum Type {
     NonTerminal(String),
 }
 
-fn create_rule(head: &str, rule: &str, terminals: &BTreeSet<String>) -> Rule {
+#[derive(Debug)]
+enum Action {
+    Shift(usize),
+    Reduce(usize),
+    Goto(usize),
+    Accept,
+}
+
+fn create_rule(head: &str, rule: &str, non_terminals: &BTreeSet<String>) -> Rule {
     Rule {
         head: Type::NonTerminal(head.to_string()),
         tokens: rule
@@ -26,10 +35,10 @@ fn create_rule(head: &str, rule: &str, terminals: &BTreeSet<String>) -> Rule {
             .filter(|s| !s.is_empty())
             .map(|s| String::from(s.trim()))
             .map(|s| {
-                if terminals.contains(&s) {
-                    Type::Terminal(s)
-                } else {
+                if non_terminals.contains(&s) {
                     Type::NonTerminal(s)
+                } else {
+                    Type::Terminal(s)
                 }
             })
             .collect::<Vec<_>>(),
@@ -60,11 +69,24 @@ fn parse_config_file(file_name: &str) -> BTreeSet<Rule> {
                 .collect::<Vec<_>>()
         });
 
-    let terminals = rules.clone().map(|(name, _)| name.to_string()).collect();
+    let non_terminals = rules.clone().map(|(name, _)| name.to_string()).collect();
 
     rules
-        .map(|(name, rule)| create_rule(name, &rule, &terminals))
+        .map(|(name, rule)| create_rule(name, &rule, &non_terminals))
         .collect::<BTreeSet<_>>()
+}
+
+fn find_symbols(all_rules: &BTreeSet<Rule>) -> BTreeSet<Type> {
+    let mut symbols = BTreeSet::new();
+    for rule in all_rules {
+        symbols.insert(rule.head.clone());
+
+        for token in rule.tokens.iter() {
+            symbols.insert(token.clone());
+        }
+    }
+
+    symbols
 }
 
 fn advance_dot(rule: &Rule) -> Rule {
@@ -129,24 +151,19 @@ fn advance_by(rules: &BTreeSet<Rule>, sym: &Type, all_rules: &BTreeSet<Rule>) ->
     closure(&modified_rules, all_rules)
 }
 
-fn generate(
+fn generate_sets(
     rules: &BTreeSet<Rule>,
 ) -> (
-    BTreeMap<usize, BTreeMap<Type, BTreeSet<Rule>>>,
+    BTreeMap<usize, BTreeSet<Rule>>,
     BTreeMap<(usize, Type), usize>,
 ) {
-    let mut tables: BTreeMap<usize, BTreeMap<Type, BTreeSet<Rule>>> = BTreeMap::new();
-    let mut lookup: BTreeMap<(usize, Type), usize> = BTreeMap::new();
-    let mut lookup_set: BTreeMap<BTreeSet<Rule>, usize> = BTreeMap::new();
+    let mut table: BTreeMap<usize, BTreeSet<Rule>> = BTreeMap::new();
+    let mut transitions: BTreeMap<(usize, Type), usize> = BTreeMap::new();
+    let mut seen: BTreeMap<BTreeSet<Rule>, usize> = BTreeMap::new();
 
-    tables.insert(
-        0,
-        vec![(Type::Terminal(START_T.to_string()), rules.clone())]
-            .into_iter()
-            .collect(),
-    );
-    lookup.insert((0, Type::Terminal(START_T.to_string())), 0);
-    lookup_set.insert(rules.clone(), 0);
+    table.insert(0, rules.clone());
+    transitions.insert((0, Type::Terminal(START_T.to_string())), 0);
+    seen.insert(rules.clone(), 0);
 
     let mut stack = Vec::new();
     stack.push((0usize, Type::Terminal(START_T.to_string())));
@@ -154,15 +171,12 @@ fn generate(
     let mut current_index = 1usize;
 
     while !stack.is_empty() {
-        let (parent_index, move_sym) = stack.pop().unwrap();
+        let (index, move_sym) = stack.pop().unwrap();
 
-        let index = lookup
-            .get(&(parent_index, move_sym.clone()))
-            .unwrap()
-            .clone();
-        let current_entries = tables.get(&parent_index).unwrap().get(&move_sym).unwrap();
+        let set_index = transitions.get(&(index, move_sym.clone())).unwrap().clone();
+        let current_set = table.get(&set_index).unwrap();
 
-        let advance_symbols: BTreeSet<Type> = current_entries
+        let advance_symbols: BTreeSet<Type> = current_set
             .iter()
             .map(|r| after_dot(r))
             .filter(|r| *r != Type::Terminal(EOS_T.to_string()))
@@ -170,35 +184,31 @@ fn generate(
 
         let advanced = advance_symbols
             .iter()
-            .map(|s| (s.clone(), advance_by(current_entries, s, rules)))
+            .map(|s| (s.clone(), advance_by(current_set, s, rules)))
             .collect::<Vec<_>>();
 
-        for (symbol, new_set) in advanced {
-            if lookup_set.contains_key(&new_set) {
-                let prev_index = *lookup_set.get(&new_set).unwrap();
-                lookup.insert((index, symbol.clone()), prev_index);
-                println!("{index} -> {prev_index}: {symbol:?} -> {new_set:?}");
+        for (advance_symbol, new_set) in advanced {
+            if seen.contains_key(&new_set) {
+                let prev_index = seen.get(&new_set).unwrap();
+                transitions.insert((set_index, advance_symbol.clone()), *prev_index);
             } else {
-                tables.insert(current_index, BTreeMap::new());
-                tables
-                    .get_mut(&parent_index)
-                    .unwrap()
-                    .insert(symbol.clone(), new_set.clone());
-                lookup_set.insert(new_set.clone(), current_index);
-                lookup.insert((parent_index, symbol.clone()), current_index);
-                stack.push((parent_index, symbol.clone()));
+                table.insert(current_index, new_set.clone());
+                transitions.insert((set_index, advance_symbol.clone()), current_index);
+                seen.insert(new_set.clone(), current_index);
 
-                println!("{index} -> {current_index}: {symbol:?} -> {new_set:?}");
+                stack.push((set_index, advance_symbol.clone()));
 
                 current_index += 1;
             }
         }
     }
 
-    (tables, lookup)
+    transitions.remove(&(0, Type::Terminal(START_T.to_string())));
+
+    (table, transitions)
 }
 
-fn nullable(all_rules: BTreeSet<Rule>) -> BTreeSet<Type> {
+fn nullable(all_rules: &BTreeSet<Rule>) -> BTreeSet<Type> {
     let mut nullable_sym = BTreeSet::new();
     nullable_sym.insert(Type::Terminal(EPS_T.to_string()));
 
@@ -216,8 +226,10 @@ fn nullable(all_rules: BTreeSet<Rule>) -> BTreeSet<Type> {
             }
 
             if nullable {
-                change = true;
-                nullable_sym.insert(rule.head.clone());
+                if !nullable_sym.contains(&rule.head) {
+                    change = true;
+                    nullable_sym.insert(rule.head.clone());
+                }
             }
         }
     }
@@ -225,18 +237,247 @@ fn nullable(all_rules: BTreeSet<Rule>) -> BTreeSet<Type> {
     nullable_sym
 }
 
-// fn first(all_rules: BTreeSet<Rule>) -> BTreeMap<Type, Type> {
-//
-// }
+fn first(all_rules: &BTreeSet<Rule>, symbols: &BTreeSet<Type>) -> BTreeMap<Type, BTreeSet<Type>> {
+    let mut first = BTreeMap::new();
 
-// fn follow(all_rules: BTreeSet<Rule>) -> BTreeMap<Type, Type> {
-//
-// }
+    for symbol in symbols {
+        match symbol {
+            Type::Terminal(s) => {
+                first.insert(
+                    Type::Terminal(s.clone()),
+                    vec![Type::Terminal(s.clone())].into_iter().collect(),
+                );
+            }
+            Type::NonTerminal(s) => {
+                first.insert(Type::NonTerminal(s.clone()), BTreeSet::new());
+            }
+        }
+    }
+
+    let nullable_set = nullable(all_rules);
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+
+        for rule in all_rules.into_iter() {
+            if !first
+                .get(&rule.head)
+                .unwrap()
+                .contains(&Type::Terminal(EPS_T.to_string()))
+            {
+                let mut isnullable = true;
+                for token in rule.tokens.iter() {
+                    if !nullable_set.contains(&token) {
+                        isnullable = false;
+                        break;
+                    }
+                }
+
+                if isnullable {
+                    first
+                        .get_mut(&rule.head)
+                        .unwrap()
+                        .insert(Type::Terminal(EPS_T.to_string()));
+                    changed = true;
+                }
+            }
+
+            for token in rule.tokens.iter() {
+                let new_set = first
+                    .get(token)
+                    .unwrap()
+                    .difference(
+                        &vec![Type::Terminal(EPS_T.to_string())]
+                            .into_iter()
+                            .collect(),
+                    )
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+
+                let current = first.get(&rule.head).unwrap();
+                let union = current.union(&new_set).cloned().collect::<BTreeSet<_>>();
+
+                if !union
+                    .symmetric_difference(current)
+                    .collect::<Vec<_>>()
+                    .is_empty()
+                {
+                    *first.get_mut(&rule.head).unwrap() = union;
+                    changed = true;
+                }
+
+                if !nullable_set.contains(token) {
+                    break;
+                }
+            }
+        }
+    }
+
+    first
+}
+
+fn follow(
+    first: &BTreeMap<Type, BTreeSet<Type>>,
+    all_rules: &BTreeSet<Rule>,
+    symbols: &BTreeSet<Type>,
+) -> BTreeMap<Type, BTreeSet<Type>> {
+    let mut follow = BTreeMap::new();
+
+    for symbol in symbols {
+        match symbol {
+            Type::Terminal(_) => {}
+            Type::NonTerminal(s) => {
+                follow.insert(Type::NonTerminal(s.clone()), BTreeSet::new());
+            }
+        }
+    }
+
+    follow.insert(
+        Type::NonTerminal(START_NT.to_string()),
+        vec![Type::Terminal(EOS_T.to_string())]
+            .into_iter()
+            .collect(),
+    );
+
+    let nullable = nullable(all_rules);
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+
+        for rule in all_rules {
+            let mut iter = rule.tokens.iter();
+
+            let mut current = iter.next();
+            let mut next = iter.next();
+
+            while let Some(token) = current {
+                if let Type::NonTerminal(_) = token {
+                    let current_set = follow.get(&token).unwrap();
+
+                    if let Some(next_token) = next {
+                        let mut new_set = BTreeSet::new();
+                        if *next_token != Type::Terminal(EPS_T.to_string()) {
+                            let first = first
+                                .get(&next_token)
+                                .unwrap()
+                                .difference(
+                                    &vec![Type::Terminal(EPS_T.to_string())]
+                                        .into_iter()
+                                        .collect(),
+                                )
+                                .cloned()
+                                .collect::<BTreeSet<_>>();
+
+                            new_set = current_set.union(&first).cloned().collect::<BTreeSet<_>>();
+                            if !new_set
+                                .symmetric_difference(&current_set)
+                                .collect::<Vec<_>>()
+                                .is_empty()
+                            {
+                                changed = true;
+                            }
+                        }
+
+                        let iter_copy = iter.clone();
+                        let mut remaining_are_nullable = true;
+                        for next_tok in iter_copy {
+                            if !nullable.contains(next_tok) {
+                                remaining_are_nullable = false;
+                                break;
+                            }
+                        }
+                        if remaining_are_nullable {
+                            let other = follow.get(&rule.head).unwrap().clone();
+                            new_set = current_set
+                                .union(&other)
+                                .cloned()
+                                .collect::<BTreeSet<_>>()
+                                .union(&new_set)
+                                .cloned()
+                                .collect::<BTreeSet<_>>();
+
+                            if !new_set
+                                .symmetric_difference(&current_set)
+                                .collect::<Vec<_>>()
+                                .is_empty()
+                            {
+                                changed = true;
+                            }
+                        }
+
+                        if !new_set.is_empty() {
+                            *follow.get_mut(&token).unwrap() = new_set;
+                        }
+                    } else {
+                        let head = follow.get(&rule.head).unwrap();
+                        let new_set = current_set.union(&head).cloned().collect::<BTreeSet<_>>();
+                        if !new_set
+                            .symmetric_difference(&current_set)
+                            .collect::<Vec<_>>()
+                            .is_empty()
+                        {
+                            *follow.get_mut(&token).unwrap() = new_set;
+                            changed = true;
+                        }
+                    }
+                }
+
+                current = next;
+                next = iter.next()
+            }
+        }
+    }
+
+    follow
+}
 
 pub fn generate_tables(file_name: &str) {
     let rules = parse_config_file(file_name);
-    // let symbols = find_symbols(&rules);
+    let symbols = find_symbols(&rules);
 
-    let (table, lookup) = generate(&rules);
-    // let tables = generate(&rules, &symbols);
+    let (sets, transitions) = generate_sets(&rules);
+
+    let first = first(&rules, &symbols);
+    let follow = follow(&first, &rules, &symbols);
+
+    let reductions = rules.iter().zip(0usize..).collect::<BTreeMap<_, _>>();
+
+    for (index, sets) in sets.iter() {
+        println!("{index} -> {sets:?}\n");
+    }
+    // println!("Sets: {sets:?}");
+
+    let mut table: BTreeMap<(usize, Type), Action> = BTreeMap::new();
+    for ((index, symbol), next_index) in transitions.into_iter() {
+        let set = sets.get(&index).unwrap();
+        if let Type::Terminal(_) = symbol {
+            table.insert((index, symbol), Action::Shift(next_index));
+
+            for rule in set {
+                if after_dot(&rule) == Type::Terminal(EOS_T.to_string()) {
+                    if rule.head != Type::NonTerminal(START_NT.to_string()) {
+                        let follow_set = follow.get(&rule.head).unwrap();
+                        for f in follow_set {
+                            let reduction = reductions
+                                .get(&Rule {
+                                    head: rule.head.clone(),
+                                    tokens: rule.tokens.clone(),
+                                    dot: 0,
+                                })
+                                .unwrap();
+                            table.insert((index, f.clone()), Action::Reduce(*reduction));
+                        }
+                    } else {
+                        table.insert((index, Type::Terminal(EOS_T.to_string())), Action::Accept);
+                    }
+                }
+            }
+        } else {
+            table.insert((index, symbol), Action::Goto(next_index));
+        }
+    }
+
+    println!("{table:?}");
 }
