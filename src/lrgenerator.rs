@@ -380,6 +380,7 @@ fn follow(
             let mut iter = rule.tokens.iter();
 
             let mut current = iter.next();
+            let iter_copy = iter.clone();
             let mut next = iter.next();
 
             while let Some(token) = current {
@@ -410,9 +411,8 @@ fn follow(
                             }
                         }
 
-                        let iter_copy = iter.clone();
                         let mut remaining_are_nullable = true;
-                        for next_tok in iter_copy {
+                        for next_tok in iter_copy.clone() {
                             if !nullable.contains(next_tok) {
                                 remaining_are_nullable = false;
                                 break;
@@ -443,6 +443,7 @@ fn follow(
                     } else {
                         let head = follow.get(&rule.head).unwrap();
                         let new_set = current_set.union(&head).cloned().collect::<BTreeSet<_>>();
+
                         if !new_set
                             .symmetric_difference(&current_set)
                             .collect::<Vec<_>>()
@@ -502,6 +503,9 @@ pub fn generate_table(file_name: &str) -> (BTreeMap<(usize, Type), Action>, BTre
                                 dot: 0,
                             })
                             .unwrap();
+                        if table.contains_key(&(index, f.clone())) {
+                            panic!("Error: values shared: {index}: {f:?}");
+                        }
                         table.insert((index, f.clone()), Action::Reduce(*reduction));
                     }
                 } else {
@@ -525,7 +529,7 @@ pub fn print_table(table: &BTreeMap<(usize, Type), Action>, reductions: &BTreeMa
         .map(|((index, _), _)| index)
         .collect::<BTreeSet<_>>();
 
-    let min_size = states.last().unwrap().to_string().len() + 1;
+    let min_size = usize::max(states.last().unwrap().to_string().len() + 1, 3);
 
     let get_rule_size = |r: &Type| match r {
         Type::Terminal(s) | Type::NonTerminal(s) => usize::max(s.len(), min_size),
