@@ -1,15 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
-const EOS_T: &str = "$";
+pub const EOS_T: &str = "$";
 const START_T: &str = "START";
-const START_NT: &str = "START";
+pub const START_NT: &str = "START";
 const EPS_T: &str = "EPS";
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct Rule {
-    head: Type,
-    tokens: Vec<Type>,
+    pub head: Type,
+    pub tokens: Vec<Type>,
     dot: usize,
 }
 
