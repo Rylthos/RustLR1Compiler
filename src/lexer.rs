@@ -23,6 +23,25 @@ fn lex(input: &String) -> Vec<Token> {
         .collect::<Vec<_>>()
 }
 
+fn minimize_tree(tree: &TreeNode) -> TreeNode {
+    match tree {
+        TreeNode::Leaf(_) => tree.clone(),
+        TreeNode::Node(nodes) => {
+            let mut new_nodes = Vec::new();
+            new_nodes.reserve(nodes.len());
+            for node in nodes {
+                new_nodes.push(minimize_tree(node));
+            }
+
+            if new_nodes.len() == 1 {
+                new_nodes.get(0).unwrap().clone()
+            } else {
+                TreeNode::Node(new_nodes)
+            }
+        }
+    }
+}
+
 fn reverse_tree(tree: &TreeNode) -> TreeNode {
     match tree {
         TreeNode::Leaf(_) => tree.clone(),
@@ -42,7 +61,7 @@ pub fn parse_string(
     input: &String,
     parse_table: &BTreeMap<(usize, Type), Action>,
     reductions: &BTreeMap<usize, Rule>,
-) {
+) -> TreeNode {
     let tokens = lex(input);
 
     let mut state_stack: VecDeque<Type> = VecDeque::new();
@@ -113,6 +132,7 @@ pub fn parse_string(
                     }
                     state_stack.push_back(rule.head.clone());
 
+                    // Create new root
                     match tree.as_ref().unwrap() {
                         TreeNode::Leaf(_) => tree = Some(TreeNode::Node(nodes)),
                         TreeNode::Node(ns) => {
@@ -148,8 +168,7 @@ pub fn parse_string(
         }
     }
 
-    let tree = reverse_tree(&tree.unwrap());
+    let tree = reverse_tree(&minimize_tree(&tree.unwrap()));
 
-    println!("Finished parsing");
-    println!("{tree:?}");
+    tree
 }
